@@ -1,0 +1,5 @@
+include README.md VALIDATION.md pyproject.toml .gitignore .gitattributes
+recursive-include src *.py
+recursive-include tests *.py
+global-exclude *.pyc
+global-exclude __pycache__
