@@ -20,7 +20,6 @@ class SharedEdgeTests(unittest.TestCase):
     def test_explicit_nonuniform_axial_parameters_prevent_z_foldback(self):
         from OCP.BRep import BRep_Tool
         u = np.array([0.0, 0.18, 0.47, 0.74, 1.0])
-        # Synthetic nonuniform stations, independent of measured geometry.
         z = np.array([0.0, 0.025, 0.05, 1.7, 2.4])
         grid = np.empty((len(u), len(z), 3))
         for i, ui in enumerate(u):

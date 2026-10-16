@@ -104,6 +104,33 @@ class NativeCurveSamplingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'budget'):
             sample_native_edge_bounded(cq.Edge.makeCircle(10),.00001,max_segments=2)
 
+    def test_bspline_decomposition_overhang_is_intersected_with_exact_native_trim(self):
+        original=bezier([(0,0,0),(1,4,0),(2,-4,0),(3,0,0)])
+        for move_first,move_last in [(True,False),(False,True),(True,True)]:
+            spline=GeomConvert.CurveToBSplineCurve_s(BRepAdaptor_Curve(original.wrapped).Bezier())
+            edge=cq.Edge(BRepBuilderAPI_MakeEdge(spline).Edge())
+            first=np.nextafter(spline.FirstParameter(),np.inf) if move_first else spline.FirstParameter()
+            last=np.nextafter(spline.LastParameter(),-np.inf) if move_last else spline.LastParameter()
+            # Construct a legitimate synthetic trimmed edge; the sampler must
+            # not change this range or the input geometry to make it pass.
+            BRep_Builder().Range(edge.wrapped,float(first),float(last))
+            self.assertTrue(edge.isValid())
+            _,parameters,report=self.check_dense(edge,.0005)
+            self.assertEqual(parameters[0],first);self.assertEqual(parameters[-1],last)
+            self.assertTrue(report['decomposition_spans_intersected_with_exact_native_trim'])
+
+    def test_even_one_ulp_of_missing_native_parameter_coverage_is_rejected(self):
+        from guided_mesh_cad.curve_sampling import _intersect_native_arc_ranges
+        with self.assertRaisesRegex(ValueError,'complete actual edge interval'):
+            _intersect_native_arc_ranges([(np.nextafter(0.,1.),1.,None,0.)],0.,1.)
+        with self.assertRaisesRegex(ValueError,'complete actual edge interval'):
+            _intersect_native_arc_ranges([(0.,np.nextafter(1.,0.),None,0.)],0.,1.)
+
+    def test_internal_one_ulp_span_gap_is_not_hidden_by_endpoint_matching(self):
+        from guided_mesh_cad.curve_sampling import _intersect_native_arc_ranges
+        with self.assertRaisesRegex(ValueError,'gap or overlap'):
+            _intersect_native_arc_ranges([(0.,.5,None,0.),(np.nextafter(.5,1.),1.,None,0.)],0.,1.)
+
     def test_bad_tolerance_and_nonedge_are_rejected(self):
         edge=cq.Edge.makeLine((0,0,0),(1,0,0));BRep_Builder().UpdateVertex(edge.Vertices()[0].wrapped,.02)
         with self.assertRaisesRegex(ValueError,'tolerance'):sample_native_edge_bounded(edge)
