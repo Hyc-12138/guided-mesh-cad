@@ -8,6 +8,22 @@ import gc
 import numpy as np
 
 
+class NativeEdgeTrimParameterError(ValueError):
+    """An owned edge was found, but the reported parameter is not in its trim.
+
+    Keep the strict evaluator's rejection separate from optional recovery.
+    Context also survives a face-ON recursion into its actual trim edges.
+    """
+    def __init__(self, extrema, owner, index, parameter, first, last):
+        super().__init__('actual edge projection parameter outside native trimmed interval')
+        self.extrema=extrema
+        self.owner=owner
+        self.index=index
+        self.parameter=float(parameter)
+        self.first=float(first)
+        self.last=float(last)
+
+
 class NativeArrayStore:
     def __init__(self, path):
         self.path=Path(path)
@@ -85,8 +101,7 @@ def native_mesh_uv_mapped(shape,store,linear=.001,angular=.05,parallel=False,pro
     for a in [vertices,uv,facets,node_faces,triangle_faces]:a.flush()
     # Retain triangulation while face and edge references are in use.
     # Geometry and cached mesh share a lifetime until validation exits.
-    # Mapped arrays reduce Python memory use but do not bound native kernel
-    # allocation; callers still need external resource monitoring.
+    # Mapped arrays do not bound native kernel allocation.
     del mesh,mesher
     gc.collect()
     return vertices,facets,uv,node_faces,triangle_faces,counts
@@ -190,8 +205,11 @@ def owned_extrema_point(extrema,owner,index=1):
             if vertices.Extent()!=1:raise ValueError('degenerate support does not identify one native vertex')
             return BRep_Tool.Pnt_s(TopoDS.Vertex_s(vertices.FindKey(1)))
         (parameter,)=extrema.ParOnEdgeS1(index);curve=BRepAdaptor_Curve(edge)
-        if not math.isfinite(parameter) or parameter<curve.FirstParameter() or parameter>curve.LastParameter():
+        if not math.isfinite(parameter):
             raise ValueError('actual edge projection parameter outside native trimmed interval')
+        if parameter<curve.FirstParameter() or parameter>curve.LastParameter():
+            raise NativeEdgeTrimParameterError(extrema,owner,index,parameter,
+                                                curve.FirstParameter(),curve.LastParameter())
         return curve.Value(parameter)
     face=TopoDS.Face_s(support);u,v=extrema.ParOnFaceS1(index)
     if not math.isfinite(u) or not math.isfinite(v):raise ValueError('nonfinite native face projection')
@@ -208,3 +226,90 @@ def owned_extrema_point(extrema,owner,index=1):
         if not trim.IsDone() or trim.NbSolution()<1:raise ValueError('native face support cannot be resolved to its actual trim')
         return owned_extrema_point(trim,edges)
     return BRepAdaptor_Surface(face).Value(u,v)
+
+
+def owned_extrema_point_with_recovery(extrema,owner,index=1,*,return_report=False):
+    """Return an actual owned witness, recovering only an invalid edge parameter.
+
+    The strict evaluator is unchanged for callers that require rejection.
+    On its typed, finite, owned-edge trim failure, solve again in the actual
+    interval and consider actual curve endpoints and topological vertices.
+    Invalid parameters are never evaluated as accepted points or clamped.
+    This is a conservative actual-point witness, not a global nearest-point
+    certificate. The caller must recompute its distance to the original query.
+    """
+    if not isinstance(return_report,bool):raise ValueError('return_report must be boolean')
+    try:
+        point=owned_extrema_point(extrema,owner,index)
+        return (point,None) if return_report else point
+    except NativeEdgeTrimParameterError as error:
+        failure=error
+    import math
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.GeomAPI import GeomAPI_ProjectPointOnCurve
+    from OCP.TopAbs import TopAbs_EDGE,TopAbs_VERTEX
+    from OCP.TopExp import TopExp
+    from OCP.TopTools import TopTools_IndexedMapOfShape
+    from OCP.TopoDS import TopoDS
+    support=failure.extrema.SupportOnShape1(failure.index)
+    if support.ShapeType()!=TopAbs_EDGE:raise ValueError('trim recovery requires an actual edge support')
+    # The nested edge must also belong to the original requested boundary.
+    identities=TopTools_IndexedMapOfShape();TopExp.MapShapes_s(owner.wrapped,TopAbs_EDGE,identities)
+    if not identities.Contains(support):raise ValueError('trim recovery edge is not owned by requested native boundary')
+    edge=TopoDS.Edge_s(support)
+    if BRep_Tool.Degenerated_s(edge) or not BRepCheck_Analyzer(edge,True).IsValid():
+        raise ValueError('trim recovery requires a valid nondegenerate native edge')
+    vertices=TopTools_IndexedMapOfShape();TopExp.MapShapes_s(edge,TopAbs_VERTEX,vertices)
+    tolerances=[float(BRep_Tool.Tolerance_s(edge))]+[
+        float(BRep_Tool.Tolerance_s(TopoDS.Vertex_s(vertices.FindKey(i))))
+        for i in range(1,vertices.Extent()+1)]
+    if not np.isfinite(tolerances).all() or max(tolerances)>.01+1e-9:
+        raise ValueError('native edge/vertex tolerance exceeds .01 mm')
+    adaptor=BRepAdaptor_Curve(edge);first=float(adaptor.FirstParameter());last=float(adaptor.LastParameter())
+    if not np.isfinite([first,last]).all() or not first<last:
+        raise ValueError('actual native edge interval must be finite and increasing')
+    query=failure.extrema.PointOnShape2(failure.index)
+    xyz=lambda p:[float(p.X()),float(p.Y()),float(p.Z())]
+    if not np.isfinite(xyz(query)).all():raise ValueError('nonfinite actual projection query')
+    # A copied native curve in the edge's actual frame; no source/native edit.
+    native_curve=adaptor.Curve().Curve().Copy();native_curve.Transform(adaptor.Trsf())
+    frame_error=max(float(native_curve.Value(u).Distance(adaptor.Value(u)))
+                    for u in (first,first+(last-first)/2,last))
+    if not math.isfinite(frame_error) or frame_error>1e-8:
+        raise ValueError('native curve parameter/frame reconstruction differs from actual edge')
+    points=[];candidates=[]
+    def add(point,kind,parameter=None,vertex=None):
+        if not np.isfinite(xyz(point)).all():raise ValueError('nonfinite actual owned trim candidate')
+        distance=float(point.Distance(query))
+        if not math.isfinite(distance):raise ValueError('nonfinite actual candidate distance')
+        points.append(point);candidates.append({'kind':kind,'parameter':parameter,
+            'owned_vertex_index':vertex,'actual_point':xyz(point),'query_distance_mm':distance})
+    # Independent enumeration of the compact curve's endpoints, not clipping
+    # the illegal reported parameter to a nearby value.
+    add(adaptor.Value(first),'native_curve_first',first)
+    add(adaptor.Value(last),'native_curve_last',last)
+    projector=GeomAPI_ProjectPointOnCurve(query,native_curve,first,last)
+    rejected=[]
+    for i in range(1,projector.NbPoints()+1):
+        parameter=float(projector.Parameter(i))
+        if not math.isfinite(parameter) or parameter<first or parameter>last:
+            rejected.append(parameter if math.isfinite(parameter) else None)
+            continue
+        add(adaptor.Value(parameter),'bounded_native_curve_projection',parameter)
+    for i in range(1,vertices.Extent()+1):
+        add(BRep_Tool.Pnt_s(TopoDS.Vertex_s(vertices.FindKey(i))),'owned_topological_vertex',vertex=i)
+    winner=min(range(len(points)),key=lambda i:candidates[i]['query_distance_mm'])
+    report={'method':'fresh bounded native-curve projection plus actual native endpoints/vertices',
+        'strict_helper_error':str(failure),'owner_edge_index':identities.FindIndex(support),
+        'native_curve_type':str(adaptor.GetType()),'actual_first_parameter':first,
+        'actual_last_parameter':last,'rejected_original_parameter':failure.parameter,
+        'original_parameter_accepted':False,'original_parameter_clamped':False,
+        'periodic_normalization_applied':False,'native_geometry_or_interval_modified':False,
+        'native_tolerances_modified':False,'untrimmed_CPP_used_as_witness':False,
+        'query_point':xyz(query),'native_curve_frame_check_max_mm':frame_error,
+        'bounded_projector_rejected_parameters':rejected,'actual_candidates':candidates,
+        'selected_candidate_index':winner,'selected_candidate':candidates[winner],
+        'scope':'Actual owned point only; caller recomputes query distance. Not certified globally nearest.'}
+    return (points[winner],report) if return_report else points[winner]

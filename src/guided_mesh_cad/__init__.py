@@ -1,5 +1,5 @@
 """Guided reconstruction; no automatic feature recognition or CAD-history recovery."""
-__version__ = "0.3.0.dev12+public.1"
+__version__ = "0.3.0.dev15+public.1"
 
 from .charts import resample_closed_contours_by_anchors, simplify_corresponding_polylines
 
@@ -24,7 +24,13 @@ def validate_native_boundary_uv_witness(*args, **kwargs):
     from .boundary_validation import validate_native_boundary_uv_witness as validate
     return validate(*args, **kwargs)
 
+def extract_material_boundary(*args, **kwargs):
+    """Explicit, contained-INTERNAL-sheet extraction; default gates stay strict."""
+    from .material_boundary import extract_material_boundary as extract
+    return extract(*args, **kwargs)
+
 __all__ = ['resample_closed_contours_by_anchors', 'simplify_corresponding_polylines',
            'validate_native_boundary', 'sample_native_edge_bounded',
-           'validate_native_boundary_uv_witness', 'validate_native_boundary_low_memory']
+           'validate_native_boundary_uv_witness', 'validate_native_boundary_low_memory',
+           'extract_material_boundary']
 

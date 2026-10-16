@@ -58,6 +58,46 @@ def _bezier_poles(curve):
     return np.c_[points*weights[:,None],weights]
 
 
+def _intersect_native_arc_ranges(arcs, first, last):
+    """Intersect decomposition spans with the exact, unchanged native trim.
+
+    OCCT can return a Bezier span endpoint one ULP beyond the edge trim. A
+    wider span still supplies a valid derivative bound. For a clipped span we
+    retain its whole control-hull bound and scale it by the actual interval
+    length; we do not relabel or subdivide its poles as if they represented a
+    different curve. Actual undercoverage or gaps remain errors, even one ULP.
+    """
+    if not arcs:
+        raise ValueError('native decomposition has no parameter spans')
+    previous=None
+    for a,b,poles,d2 in arcs:
+        if not np.isfinite([a,b]).all() or not a<b or not np.isfinite(b-a):
+            raise ValueError('native decomposition parameter spans must be finite and increasing')
+        if previous is not None and a!=previous:
+            raise ValueError('native decomposition parameter spans contain a gap or overlap')
+        previous=b
+    if arcs[0][0]>first or arcs[-1][1]<last:
+        raise ValueError('native decomposition does not cover the complete actual edge interval')
+    clipped=[];details=[]
+    for a,b,poles,d2 in arcs:
+        lo=max(a,first);hi=min(b,last)
+        if hi<=lo:continue  # Entirely outside the actual edge, not omitted material.
+        if lo!=a or hi!=b:
+            if poles is not None:
+                # Tuple carries D2 in the original span's local unit parameter
+                # and that span's length. Ratios avoid squaring large native
+                # parameters or underflowing a global derivative prematurely.
+                d2=(_rational_bezier_d2_bound(poles),b-a)
+                poles=None
+            details.append({'decomposition_first_parameter':a,'decomposition_last_parameter':b,
+                            'actual_first_parameter':lo,'actual_last_parameter':hi,
+                            'bound_uses_complete_original_span':True})
+        clipped.append((lo,hi,poles,d2))
+    if not clipped or clipped[0][0]!=first or clipped[-1][1]!=last:
+        raise ValueError('native interval coverage is incomplete after exact intersection')
+    return clipped,details
+
+
 def sample_native_edge_bounded(edge,max_deviation_mm=.0001,*,max_segments=200000,
                                max_depth=30,source_binding=None):
     """Return (points, native_parameters, report) for one native mm edge.
@@ -118,8 +158,6 @@ def sample_native_edge_bounded(edge,max_deviation_mm=.0001,*,max_segments=200000
         arcs=[(float(knots.Value(i)),float(knots.Value(i+1)),_bezier_poles(converter.Arc(i)),None) for i in range(1,converter.NbArcs()+1)]
     else:
         raise ValueError('native curve type is unsupported; no approximate conversion substituted')
-    if len(arcs)>max_segments:
-        raise ValueError('native knot spans already exceed max_segments')
     coordinate_scale=1.
     for ua,ub,poles,_ in arcs:
         ends=[_point(adaptor.Value(ua)),_point(adaptor.Value(ub))]
@@ -129,13 +167,21 @@ def sample_native_edge_bounded(edge,max_deviation_mm=.0001,*,max_segments=200000
             conversion_residual=max(conversion_residual,*[float(np.linalg.norm(a-b)) for a,b in zip(ends,ends2)])
     if conversion_residual>1e-8:
         raise ValueError('native Bezier decomposition coordinate/parameter check failed')
+    arcs,clipped_spans=_intersect_native_arc_ranges(arcs,first,last)
+    if len(arcs)>max_segments:
+        raise ValueError('native knot spans already exceed max_segments')
     numerical_budget=max(1e-12,128*np.finfo(float).eps*coordinate_scale,4*conversion_residual)
     if limit<=numerical_budget:
         raise ValueError('requested deviation is below the reported numerical budget')
     stack=[(ua,ub,poles,d2,0) for ua,ub,poles,d2 in reversed(arcs)];leaves=[]
     while stack:
         ua,ub,poles,d2,depth=stack.pop()
-        local_d2=_rational_bezier_d2_bound(poles) if poles is not None else float(d2)*(ub-ua)**2
+        if poles is not None:
+            local_d2=_rational_bezier_d2_bound(poles)
+        elif isinstance(d2,tuple):
+            local_d2=d2[0]*((ub-ua)/d2[1])**2
+        else:
+            local_d2=float(d2)*(ub-ua)**2
         bound=local_d2/8*(1+1e-12)+numerical_budget
         if bound<=limit:
             leaves.append({'first_parameter':ua,'last_parameter':ub,'local_unit_parameter_second_derivative_bound_mm':local_d2,'interpolation_error_upper_bound_mm':bound,'depth':depth})
@@ -156,4 +202,5 @@ def sample_native_edge_bounded(edge,max_deviation_mm=.0001,*,max_segments=200000
     for vertex in edge.Vertices():
         point=np.array(vertex.toTuple(),dtype=float);endpoint_offsets.append(float(np.linalg.norm(points[[0,-1]]-point,axis=1).min()))
     report={'method':'native_curve_derivative_control_bound.v1','units':'mm','curve_type':str(kind),'native_parameter_range':[first,last],'native_topods_orientation':str(edge.wrapped.Orientation()),'segments':len(leaves),'samples':len(points),'max_deviation_limit_mm':limit,'whole_curve_polyline_error_upper_bound_mm':max(row['interpolation_error_upper_bound_mm'] for row in leaves),'native_bezier_spans':len(arcs),'native_decomposition_endpoint_max_residual_mm':conversion_residual,'floating_numerical_budget_mm':numerical_budget,'native_edge_tolerance_mm':native_edge_tol,'native_vertex_tolerance_max_mm':native_vertex_tol,'topological_vertex_endpoint_offsets_mm':endpoint_offsets,'source_binding':source_binding,'intervals':leaves,'input_geometry_modified':False,'bound_scope':'Actual trimmed geometric curve and its same-parameter piecewise linear interpolant, in both directions. Includes every native knot span; no endpoint/midpoint-only acceptance. Floating derivative-control bounds are not interval arithmetic certificates, topology/pcurve bounds, later-surface error bounds or whole-source/solid acceptance.'}
+    report['decomposition_spans_intersected_with_exact_native_trim']=clipped_spans
     return points,parameters,report

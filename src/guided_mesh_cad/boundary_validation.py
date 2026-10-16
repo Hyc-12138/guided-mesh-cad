@@ -5,6 +5,7 @@ coordinates never replace the CAD boundary in this metric. Legacy mesh-based
 validation remains separate and unchanged.
 """
 from pathlib import Path
+import json
 import time
 import numpy as np
 from .mesh import load_mesh, polydata, sample_triangles, mesh_distances, sha256
@@ -137,13 +138,19 @@ def validate_native_boundary(source_path, step_path, report_path, *,
         diagnostic_out.mkdir(parents=True,exist_ok=True)
     timings = {}; start = time.perf_counter()
     store=None;support_reconstruction_count=0;support_coordinate_residual_max=0.
+    trim_parameter_recovery_count=0;trim_parameter_recovery_path=None
     if _low_memory:
-        from .memory_validation import NativeArrayStore,native_mesh_uv_mapped,mapped_native_sampling,mapped_mesh_hints,mesh_distances_into,owned_extrema_point
+        from .memory_validation import NativeArrayStore,native_mesh_uv_mapped,mapped_native_sampling,mapped_mesh_hints,mesh_distances_into,owned_extrema_point_with_recovery
         store=NativeArrayStore(diagnostic_out/'native_arrays')
         if _resource_registry is not None:_resource_registry.append(store)
     def actual_extrema_point(extrema,owner):
-        nonlocal support_reconstruction_count,support_coordinate_residual_max
-        point=owned_extrema_point(extrema,owner)
+        nonlocal support_reconstruction_count,support_coordinate_residual_max,trim_parameter_recovery_count,trim_parameter_recovery_path
+        point,recovery=owned_extrema_point_with_recovery(extrema,owner,return_report=True)
+        if recovery is not None:
+            trim_parameter_recovery_count+=1
+            trim_parameter_recovery_path=diagnostic_out/'native_trim_parameter_recoveries.jsonl'
+            with trim_parameter_recovery_path.open('a',encoding='utf-8') as stream:
+                stream.write(json.dumps(recovery,allow_nan=False)+'\n')
         cached=extrema.PointOnShape1(1)
         support_coordinate_residual_max=max(support_coordinate_residual_max,float(point.Distance(cached)))
         support_reconstruction_count+=1
@@ -308,9 +315,11 @@ def validate_native_boundary(source_path, step_path, report_path, *,
                     face_edges[face_id].wrapped,cq.Vertex.makeVertex(point.X(),point.Y(),point.Z()).wrapped)
                 if not extrema.IsDone() or extrema.NbSolution()<1:
                     raise ValueError('outside UV sample could not be projected to its actual trimmed face')
+                original_surface_point=point
                 point=actual_extrema_point(extrema,face_edges[face_id]) if _low_memory else extrema.PointOnShape1(1)
                 corrected+=1
-                trim_projection_max=max(trim_projection_max,float(extrema.Value()))
+                actual_trim_distance=float(point.Distance(original_surface_point)) if _low_memory else float(extrema.Value())
+                trim_projection_max=max(trim_projection_max,actual_trim_distance)
                 if state==TopAbs_ON:on_boundary+=1
                 else:outside+=1
             native_points[i]=[point.X(),point.Y(),point.Z()]
@@ -403,6 +412,10 @@ def validate_native_boundary(source_path, step_path, report_path, *,
             'all_native_UV_nodes_triangle_centres_random_edges_vertices_retained':True,
             'owned_support_coordinate_reconstructions':support_reconstruction_count,
             'cached_CPP_to_evaluated_owned_point_max_mm':support_coordinate_residual_max,
+            'native_trim_parameter_recoveries':trim_parameter_recovery_count,
+            'native_trim_parameter_recovery_records':None if trim_parameter_recovery_path is None else {
+                'path':str(trim_parameter_recovery_path.resolve()),'sha256':sha256(trim_parameter_recovery_path),
+                'records':trim_parameter_recovery_count},
             'scope':'Storage/execution change with the same requested mesh precision and complete generated-mesh sample coverage. Returned CPP points are re-evaluated on owned native supports and all source distances measured to those actual points. Working arrays remain on disk as diagnostic evidence; external process memory guarding is still required.'}
     dump(report_path,result)
     if store is not None:store.close()
