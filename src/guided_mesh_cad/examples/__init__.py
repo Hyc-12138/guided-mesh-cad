@@ -1,1 +1,1 @@
-"""Analytic synthetic examples generated locally on request."""
+"""Synthetic public examples, without customer source data."""
