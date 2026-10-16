@@ -1,4 +1,4 @@
-include README.md VALIDATION.md pyproject.toml .gitignore .gitattributes
+include CHANGELOG.md README.md VALIDATION.md pyproject.toml .gitignore .gitattributes
 recursive-include src *.py
 recursive-include tests *.py
 global-exclude *.pyc

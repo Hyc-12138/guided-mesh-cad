@@ -6,7 +6,7 @@
 
 **本工具不内置 LLM，也不自动调用模型服务。** 如使用 LLM，需自行选择模型及交互方式；LLM 生成的方案仍须由操作者核对，并通过工具的几何与偏差检查。
 
-当前版本：`0.3.0.dev12+public.1`，实验性开发版本。分区、UV 参数化、共有边协调和特征判断由操作者提供；不具备任意网格的全自动逆向能力。输出不包含原设计特征树。
+当前版本：`0.3.0.dev15+public.1`，实验性开发版本。分区、UV 参数化、共有边协调和特征判断由操作者提供；不具备任意网格的全自动逆向能力。输出不包含原设计特征树。
 
 ## 安装
 
@@ -22,7 +22,7 @@ python -m guided_mesh_cad doctor
 也可以安装随发布提供的 wheel：
 
 ```sh
-python -m pip install guided_mesh_cad-0.3.0.dev12+public.1-py3-none-any.whl
+python -m pip install guided_mesh_cad-0.3.0.dev15+public.1-py3-none-any.whl
 ```
 
 wheel 包含本项目的 Python 代码与示例生成器。原生 CAD 依赖由 pip 单独安装，未内置在 wheel 中。
@@ -65,6 +65,7 @@ from guided_mesh_cad import (
     validate_native_boundary,
     validate_native_boundary_uv_witness,
     validate_native_boundary_low_memory,
+    extract_material_boundary,
 )
 ```
 
@@ -76,6 +77,12 @@ from guided_mesh_cad import (
 - `validate_native_boundary_low_memory` 将完整采样数组存入磁盘映射文件，保持检查范围；需要新的 `diagnostics_dir`。
 
 `guided_mesh_cad.cad` 还提供 `canonical_shared_edge`、`validate_shared_boundaries`、`face_from_surface_and_wires` 和 `sew_solid_with_report`。共有边需复用同一原生 Edge，几何重合的独立边不能替代拓扑共享。
+
+## 显式材料边界提取
+
+`extract_material_boundary(shape, evidence=...)` 接受有效、正体积、单个 Solid 的原生几何，可显式移除全部面为 INTERNAL 的开放内部壳。移除前会用完整面减去保留材料实体的布尔检查验证其空间包含关系；不能用角点或体积相同替代。保留原闭壳、有向面、位置、多重性和封闭内腔，并检查输入 BRep 哈希未变。
+
+多个实体、游离拓扑、无效模型、混合方向开放壳、超限原生容差或未完成的包含检查均会失败。原有严格读取和验证入口不会自动调用此功能。提取后仍需对完整原始输入进行双向偏差检查；提取报告不构成整件精度证明。
 
 ## 限制
 
