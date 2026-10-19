@@ -1,12 +1,14 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "guided-mesh-cad"
-version = "0.3.0.dev15+public.1"
+version = "0.3.0.dev17+public.1"
 description = "Guided multi-patch mesh to native BRep reconstruction and validation"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
 dependencies = ["numpy>=1.26", "scipy>=1.13,<2", "cadquery==2.8.0", "vtk>=9.6,<9.7"]
 

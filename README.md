@@ -6,7 +6,7 @@
 
 **本工具不内置 LLM，也不自动调用模型服务。** 如使用 LLM，需自行选择模型及交互方式；LLM 生成的方案仍须由操作者核对，并通过工具的几何与偏差检查。
 
-当前版本：`0.3.0.dev15+public.1`，实验性开发版本。分区、UV 参数化、共有边协调和特征判断由操作者提供；不具备任意网格的全自动逆向能力。输出不包含原设计特征树。
+当前版本：`0.3.0.dev17+public.1`，实验性开发版本。分区、UV 参数化、共有边协调和特征判断由操作者提供；不具备任意网格的全自动逆向能力。输出不包含原设计特征树。
 
 ## 安装
 
@@ -22,7 +22,7 @@ python -m guided_mesh_cad doctor
 也可以安装随发布提供的 wheel：
 
 ```sh
-python -m pip install guided_mesh_cad-0.3.0.dev15+public.1-py3-none-any.whl
+python -m pip install guided_mesh_cad-0.3.0.dev17+public.1-py3-none-any.whl
 ```
 
 wheel 包含本项目的 Python 代码与示例生成器。原生 CAD 依赖由 pip 单独安装，未内置在 wheel 中。
@@ -66,6 +66,10 @@ from guided_mesh_cad import (
     validate_native_boundary_uv_witness,
     validate_native_boundary_low_memory,
     extract_material_boundary,
+    prepare_source_disk_quads,
+    make_control_face,
+    pullback_affine_pcurve,
+    make_affine_pcurve_edge,
 )
 ```
 
@@ -83,6 +87,14 @@ from guided_mesh_cad import (
 `extract_material_boundary(shape, evidence=...)` 接受有效、正体积、单个 Solid 的原生几何，可显式移除全部面为 INTERNAL 的开放内部壳。移除前会用完整面减去保留材料实体的布尔检查验证其空间包含关系；不能用角点或体积相同替代。保留原闭壳、有向面、位置、多重性和封闭内腔，并检查输入 BRep 哈希未变。
 
 多个实体、游离拓扑、无效模型、混合方向开放壳、超限原生容差或未完成的包含检查均会失败。原有严格读取和验证入口不会自动调用此功能。提取后仍需对完整原始输入进行双向偏差检查；提取报告不构成整件精度证明。
+
+## 新增曲面与边界工具
+
+- `prepare_source_disk_quads`：对调用方提供的完整圆盘拓扑网格及边界锚点生成四边曲面参数图，并保存每个生成点对应的原始三角形与重心坐标。输入缺面、重复面或边界不一致时拒绝。
+- `make_control_face`：用明确的控制点网生成原生 B-spline 曲面。控制点不等于曲面插值点，仍需验证对原始几何的偏差。
+- `pullback_affine_pcurve` / `make_affine_pcurve_edge`：从原生 B-spline 支撑曲面上的一段 UV 直线构造同参数三维曲线或边，保留被跨曲面结点的连续性，记录整段系数误差界及浮点余量。
+
+这些接口要求有效的曲面、正权重、可分辨参数区间和可满足的误差预算。共享顶点还须满足自身原生容差与构边条件。无法分辨的结点事件或超出预算时拒绝；生成后仍须核对真实面域、孔、拼接、布尔及整件偏差。
 
 ## 限制
 
@@ -104,3 +116,9 @@ python -m build
 测试使用程序生成的几何及故意构造的错误输入，覆盖共有边、壳闭合、容差拒绝、曲线采样、轮廓处理和边界验证。构建产物位于 `dist/`。发布验证范围见 `VALIDATION.md`。
 
 项目只调用依赖库的公开接口，不随源码或 wheel 重新分发依赖库二进制。
+
+## 许可证
+
+本项目源码、测试与示例采用 [Apache License 2.0](LICENSE)，版权声明见 [NOTICE](NOTICE)。许可允许按条款使用、修改和分发，包括商业使用。第三方依赖保留各自许可证，详见各依赖项目。
+
+公开文件复查范围见 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)。
