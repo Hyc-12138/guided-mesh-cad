@@ -4,6 +4,7 @@ Inspection triangles select face hints and UV sample locations. Their 3-D
 coordinates never replace the CAD boundary in this metric. Legacy mesh-based
 validation remains separate and unchanged.
 """
+from .native_trim import classify_native_uv
 from pathlib import Path
 import json
 import time
@@ -12,7 +13,7 @@ from .mesh import load_mesh, polydata, sample_triangles, mesh_distances, sha256
 from .pipeline import dump, positive
 
 
-def _native_mesh_uv(shape, linear=.001, angular=.05):
+def _native_mesh_uv(shape, linear=.001, angular=.05, *, recover_narrow_faces=False, recovery_records=None):
     from OCP.BRepTools import BRepTools
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.BRep import BRep_Tool
@@ -22,6 +23,10 @@ def _native_mesh_uv(shape, linear=.001, angular=.05):
     mesher = BRepMesh_IncrementalMesh(shape.wrapped, linear, False, angular, True)
     if not mesher.IsDone():
         raise ValueError('native absolute-deflection mesher failed')
+    if recover_narrow_faces:
+        from .mesh_recovery import recover_narrow_face_meshes
+        recovered=recover_narrow_face_meshes(shape,linear,angular)
+        if recovery_records is not None:recovery_records.extend(recovered)
     vertices, triangles, uv, node_faces, triangle_faces = [], [], [], [], []
     offset = 0
     for face_id, face in enumerate(shape.Faces()):
@@ -93,7 +98,8 @@ def _native_uv_triangle_hint(vertices,triangles,uv_nodes,cell_index,closest):
 def validate_native_boundary(source_path, step_path, report_path, *,
                              tolerance_mm=.01, samples=100000, seed=73191,
                              diagnostics_dir=None, progress=None,_uv_witness=False,
-                             _low_memory=False,_mesh_parallel=True,_resource_registry=None):
+                             _low_memory=False,_mesh_parallel=True,_resource_registry=None,
+                             recover_narrow_mesh_faces=False):
     """Compare complete source with actual trimmed native geometry.
 
     Both inputs must use mm. Every source vertex/triangle centre and all native
@@ -106,6 +112,10 @@ def validate_native_boundary(source_path, step_path, report_path, *,
 
     This remains a finite-sample test, not a global Hausdorff certificate.
     It does not rewrite legacy mesh-based results or relax their metrics.
+
+    The historical ``step_path`` argument also accepts BREP/BRP. BRep is read
+    directly, without STEP exchange, repair or tolerance changes. Input format
+    and the actual file hash are reported; STEP results retain step_sha256.
     """
     import cadquery as cq
     import vtk
@@ -116,9 +126,10 @@ def validate_native_boundary(source_path, step_path, report_path, *,
     from OCP.BRepExtrema import BRepExtrema_DistShapeShape
     from OCP.TopAbs import TopAbs_IN, TopAbs_ON
     from OCP.gp import gp_Pnt, gp_Pnt2d
-    from .cad import read_step_unchecked, shape_check_report
+    from .cad import read_native_unchecked, shape_check_report
     from . import __version__
     if not isinstance(_uv_witness,bool):raise ValueError('internal UV witness strategy must be boolean')
+    if not isinstance(recover_narrow_mesh_faces,bool):raise ValueError('recover_narrow_mesh_faces must be boolean')
     if not isinstance(_low_memory,bool) or not isinstance(_mesh_parallel,bool):
         raise ValueError('memory and mesh strategies must be boolean')
     if _low_memory and not _uv_witness:
@@ -155,17 +166,28 @@ def validate_native_boundary(source_path, step_path, report_path, *,
         support_coordinate_residual_max=max(support_coordinate_residual_max,float(point.Distance(cached)))
         support_reconstruction_count+=1
         return point
-    sv,sf = load_mesh(source_path); shape = read_step_unchecked(step_path)
+    model_path = Path(step_path)
+    suffix = model_path.suffix.lower()
+    if suffix not in ('.step', '.stp', '.brep', '.brp'):
+        raise ValueError('native boundary input must be STEP/STP or BREP/BRP')
+    model_format = 'brep' if suffix in ('.brep', '.brp') else 'step'
+    model_hash = sha256(model_path)
+    sv,sf = load_mesh(source_path); shape = read_native_unchecked(model_path)
+    if sha256(model_path) != model_hash:
+        raise ValueError('native input changed while being read; no bound verification result')
     _owned_solid(shape); faces = shape.Faces()
     face_edges = [cq.Compound.makeCompound(face.Edges()) for face in faces]
     boundary = cq.Compound.makeCompound(faces)
     timings['read_native_checks'] = time.perf_counter()-start
     stage = time.perf_counter()
+    mesh_recovery_records=[]
     if _low_memory:
         mv,mf,mesh_uv,node_faces,triangle_faces,face_mesh_counts=native_mesh_uv_mapped(
-            shape,store,limit/10,.05,_mesh_parallel,progress)
+            shape,store,limit/10,.05,_mesh_parallel,progress,
+            recover_narrow_faces=recover_narrow_mesh_faces,recovery_records=mesh_recovery_records)
     else:
-        mv,mf,mesh_uv,node_faces,triangle_faces = _native_mesh_uv(shape, limit/10, .05)
+        mv,mf,mesh_uv,node_faces,triangle_faces = _native_mesh_uv(shape, limit/10, .05,
+            recover_narrow_faces=recover_narrow_mesh_faces,recovery_records=mesh_recovery_records)
     timings['native_uv_mesh'] = time.perf_counter()-stage
     surfaces = [BRep_Tool.Surface_s(face.wrapped) for face in faces]
     projectors = []
@@ -207,7 +229,7 @@ def validate_native_boundary(source_path, step_path, report_path, *,
             else:
                 try:
                     u,v=map(float,hint)
-                    classifier.Perform(faces[face_id].wrapped,gp_Pnt2d(u,v),1e-9,True,1e-7)
+                    classify_native_uv(classifier,faces[face_id].wrapped,u,v)
                     # ON points still use the original actual trim-edge path.
                     if classifier.State()!=TopAbs_IN:witness_rejections['outside_or_on_trim']+=1
                     else:
@@ -228,7 +250,7 @@ def validate_native_boundary(source_path, step_path, report_path, *,
             projector.Perform(gp_Pnt(*map(float,xyz)))
             if projector.IsDone() and projector.NbPoints()>0:
                 u,v = projector.LowerDistanceParameters()
-                classifier.Perform(faces[face_id].wrapped,gp_Pnt2d(u,v),1e-9,True,1e-7)
+                classify_native_uv(classifier,faces[face_id].wrapped,u,v)
                 if classifier.State() == TopAbs_IN:
                     if _low_memory:
                         point=surfaces[face_id].Value(float(u),float(v))
@@ -304,7 +326,7 @@ def validate_native_boundary(source_path, step_path, report_path, *,
         corrected=0; outside=0; on_boundary=0
         for i in ids:
             u,v=map(float,uv[i]); point=surface.Value(u,v)
-            classifier.Perform(face.wrapped,gp_Pnt2d(u,v),1e-9,True,1e-7)
+            classify_native_uv(classifier,face.wrapped,u,v)
             state=classifier.State()
             if state != TopAbs_IN:
                 # A UV point outside a trimmed domain lies on its supporting
@@ -376,6 +398,8 @@ def validate_native_boundary(source_path, step_path, report_path, *,
                             native_actual_points=native_points,native_to_source_distances=reverse,**witness_evidence)
         diagnostics={'native_uv_tessellation':str(cache.resolve()),'native_uv_tessellation_sha256':sha256(cache),
                      'actual_boundary_samples':str(evidence.resolve()),'actual_boundary_samples_sha256':sha256(evidence)}
+    if sha256(model_path) != model_hash:
+        raise ValueError('native input changed during verification; no bound verification result')
     maximum=max(float(forward.max()),float(reverse.max()))
     result={'verification_method':('actual_trimmed_native_boundary_uv_witness_low_memory' if _low_memory else 'actual_trimmed_native_boundary_uv_witness') if _uv_witness else 'actual_trimmed_native_boundary','package_version':__version__,
             'passed':bool(maximum<=limit),'sampled_max_mm':maximum,'tolerance_mm':limit,
@@ -395,10 +419,17 @@ def validate_native_boundary(source_path, step_path, report_path, *,
             'native_tessellation_requested_deflection_mm':limit/10,
             'native_tessellation_is_relative':False,'native_tessellation_requested_angle_radians':.05,
             'seed':seed,'random_samples_each_direction':samples,'source_sha256':sha256(source_path),
-            'step_sha256':sha256(step_path),'native':shape_check_report(shape),
+            'step_sha256':model_hash if model_format == 'step' else None,
+            'model_sha256':model_hash,'model_format':model_format,
+            'model_path':str(model_path.resolve()),
+            'native_input_reader':'cadquery.Shape.importBrep' if model_format == 'brep' else 'OCP.STEPControl_Reader',
+            'native_input_file_unchanged':True,'native':shape_check_report(shape),
             'diagnostics':diagnostics,'timings_seconds':timings,'elapsed_seconds':time.perf_counter()-start,
             'source_completeness_and_manufacturing_intent_verified':False,
             'scope':'Complete supplied source vertices/triangle centres plus random samples compared with valid actual trimmed CAD face or edge points; all native faces sampled at every mesh-UV node/triangle centre plus random UV and native edges/vertices. Finite sampling only, not a global Hausdorff certificate. Input mesh may be partial or noisy; this metric does not establish source completeness or manufacturing intent. Inspection mesh coordinates are diagnostic and are never substituted for CAD boundary positions; prior mesh-based failures remain separate.'}
+    if recover_narrow_mesh_faces:
+        result['native_narrow_face_mesh_recovery']={'enabled':True,'recovered_faces':mesh_recovery_records,
+            'scope':'One native-only retry on a copied valid unmeshed narrow face at (2*area/perimeter)/4, strictly finer than the nominal deflection. No geometry, topology, tolerance or source-file repair. Every recovered UV node/triangle and all original edge/vertex witnesses remain in the metric. The width proxy selects a meshing strategy, not an accuracy certificate. Unsupported failures still reject.'}
     if _uv_witness:
         result['source_uv_witness']={'accepted_actual_in_trim_points':int(witness_used.sum()),
             'original_projection_points':int((~witness_used).sum()),'hint_rejections':witness_rejections,

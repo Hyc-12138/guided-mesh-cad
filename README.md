@@ -1,124 +1,43 @@
 # guided-mesh-cad
 
-根据明确的曲面分区和参数化方案，将三角网格重建为原生 B-spline 曲面、闭合实体，并导出 STEP / BRep。提供共有边检查、拓扑诊断和网格与原生边界的双向偏差检查。
+面向 LLM 或操作者辅助定位的实验性网格逆向、原生几何检查和可恢复装配工具。当前版本：**0.3.0.dev23+public.1**；是否发布以同版本 wheel、SHA256 和安装验收记录为准。
 
-本工具面向 **LLM 辅助的网格逆向工作流**：由操作者或 LLM 分析几何结构、划分曲面并编制重建方案，工具负责执行几何重建、拓扑检查和偏差验证。熟悉几何与参数化的操作者也可手工编制方案，不强制依赖 LLM。
+输入支持 NPZ 网格、BRep、STEP。曲面分区、功能界面和允许简化的范围由调用者提供；工具不自动识别任意网格的设计意图，也不恢复原始 CAD 特征历史。可处理任意空间方向的多块自由曲面，不要求相同截面。
 
-**本工具不内置 LLM，也不自动调用模型服务。** 如使用 LLM，需自行选择模型及交互方式；LLM 生成的方案仍须由操作者核对，并通过工具的几何与偏差检查。
+## 常用命令
 
-当前版本：`0.3.0.dev17+public.1`，实验性开发版本。分区、UV 参数化、共有边协调和特征判断由操作者提供；不具备任意网格的全自动逆向能力。输出不包含原设计特征树。
-
-## 安装
-
-需要 Python 3.12 或以上。依赖为 NumPy、SciPy、CadQuery 和 VTK，具体范围见 `pyproject.toml`。本次验证环境为 Windows / Python 3.12；其他平台和 Python 版本未在此发布副本上验证。
-
-在源码目录中执行：
-
-```sh
-python -m pip install .
-python -m guided_mesh_cad doctor
+```powershell
+python -m guided_mesh_cad example workflow --out demo-input
+python -m guided_mesh_cad run demo-input/plan.json --out demo-run
+python -m guided_mesh_cad status demo-run
+python -m guided_mesh_cad resume demo-run
+python -m guided_mesh_cad diagnose demo-run --task verify --view errors
+python -m guided_mesh_cad diagnose demo-run --task verify --view report --pointer /instances
 ```
 
-也可以安装随发布提供的 wheel：
+默认返回短摘要，完整报告、原生点证书和日志留在运行目录。旧单步命令保留；需要完整 stdout 报告时显式加 `--full`。状态和已保存诊断不加载 CAD。资源保护用于 `run/resume` 的隔离工作进程，直接 Python API 和旧单步命令由调用者安排资源。
 
-```sh
-python -m pip install guided_mesh_cad-0.3.0.dev17+public.1-py3-none-any.whl
+- [运行计划、恢复、按需诊断](docs/workflows.md)
+- [本版能力、边界与验证矩阵](docs/dev23.md)
+- [既有重建、曲面、材料检查接口](docs/legacy_reference_dev22.md)
+
+## 必须保留的边界
+
+执行完成不等于整机几何、材料、无干涉或连续运动验收。原生实际点给出保守距离上界；未命中才执行边界距离求解。没有覆盖的窄面、用户声明的简化和原始警告保留在报告中。
+
+C0 有效参数域诊断及显式非周期 B-spline 参数域限制不替代完整 BRep 拓扑修复。原生布尔警告不能用有限点检查豁免。
+
+安装到隔离目录验证，不覆盖共用建模环境：
+
+```powershell
+python -m pip install --no-deps --target isolated path/to/verified-wheel.whl
 ```
 
-wheel 包含本项目的 Python 代码与示例生成器。原生 CAD 依赖由 pip 单独安装，未内置在 wheel 中。
+Python >=3.12；原生测试环境为 CadQuery 2.8.0、OCP 7.9.3.1、VTK 9.6.2。wheel 不自带 CAD 内核，不包含 PDF/U3D 解码器。安装器不修改用户输入。
 
-## 快速开始
-
-所有示例都通过数学公式现场生成，不需要外部模型文件。使用新的输出目录：
-
-```sh
-python -m guided_mesh_cad example loop --out demo-input
-python -m guided_mesh_cad reconstruct demo-input/plan.json --out demo-output
-python -m guided_mesh_cad diagnose-step demo-output/model.step --report topology.json
-python -m guided_mesh_cad validate demo-input/source.npz demo-output/model.step --report check.json --tolerance-mm 0.01
-```
-
-`example freeform` 生成六块不对称曲面和斜向贯穿孔的合成示例；`example loop` 生成空间起伏闭环的十六块曲面。示例用于检查数值流程，不证明未知模型的自动分区能力。
-
-CLI 退出码：`0` 为当前命令通过，`2` 为检查完成但不满足条件，`1` 为输入或运行错误。采样检查通过仅适用于对应输入和检查范围。
-
-## 输入与重建
-
-输入 `.npz` 包含毫米制 `vertices`（N×3 坐标）及 `faces`（M×3 整数三角形索引）。plan JSON 绑定输入文件 SHA-256，并声明范围、曲面块和验证参数。可运行的完整 plan 由示例命令生成。
-
-- `indexed_grid`：提供原始顶点索引网格。
-- `uv_chart`：提供原始三角网格的顶点、三角形及显式 UV 参数域，按实际三角形重采样。
-- `construction_mesh`：可选辅助构造网格，需单独绑定哈希及依据；最终偏差仍对完整输入网格检查。
-- `cylinder_cut`：显式圆柱切除，要求方向、位置、尺寸和来源说明。
-
-每个曲面块需要四边参数域。不能表示的区域需要先拆分；开口、错误拓扑或超差会失败。缝合容差受到验证阈值约束，不能靠放宽容差替代正确边界。
-
-主要输出：`model.step`、`model.brep`、`manifest.json`、`verification.json`、`fitted_grids.npz` 和 plan 副本。报告记录输入输出哈希、范围及检查结果。运行错误保存 `failure.json`；重建拒绝覆盖非空输出目录。
-
-## Python API
-
-```python
-from guided_mesh_cad import (
-    resample_closed_contours_by_anchors,
-    simplify_corresponding_polylines,
-    sample_native_edge_bounded,
-    validate_native_boundary,
-    validate_native_boundary_uv_witness,
-    validate_native_boundary_low_memory,
-    extract_material_boundary,
-    prepare_source_disk_quads,
-    make_control_face,
-    pullback_affine_pcurve,
-    make_affine_pcurve_edge,
-)
-```
-
-- 轮廓锚点重采样保持调用方声明的跨站对应关系，不自动判断锚点语义。
-- 对应折线简化保留指定特征点，在相同参数处约束输入分段线性折线的偏差；不保证后续高阶插值的误差。
-- 原生曲线采样使用导数控制界细分，支持有限裁剪直线、圆、椭圆、Bezier 及 B-spline；预算不足或不支持的曲线会明确失败。
-- `validate_native_boundary` 对实际裁剪 CAD 边界检查，包含全部源顶点、三角形中心、随机点及原生边界见证点。
-- `validate_native_boundary_uv_witness` 使用真实原生曲面点提供距离上界，无法接受提示点时回退到原生边界投影。
-- `validate_native_boundary_low_memory` 将完整采样数组存入磁盘映射文件，保持检查范围；需要新的 `diagnostics_dir`。
-
-`guided_mesh_cad.cad` 还提供 `canonical_shared_edge`、`validate_shared_boundaries`、`face_from_surface_and_wires` 和 `sew_solid_with_report`。共有边需复用同一原生 Edge，几何重合的独立边不能替代拓扑共享。
-
-## 显式材料边界提取
-
-`extract_material_boundary(shape, evidence=...)` 接受有效、正体积、单个 Solid 的原生几何，可显式移除全部面为 INTERNAL 的开放内部壳。移除前会用完整面减去保留材料实体的布尔检查验证其空间包含关系；不能用角点或体积相同替代。保留原闭壳、有向面、位置、多重性和封闭内腔，并检查输入 BRep 哈希未变。
-
-多个实体、游离拓扑、无效模型、混合方向开放壳、超限原生容差或未完成的包含检查均会失败。原有严格读取和验证入口不会自动调用此功能。提取后仍需对完整原始输入进行双向偏差检查；提取报告不构成整件精度证明。
-
-## 新增曲面与边界工具
-
-- `prepare_source_disk_quads`：对调用方提供的完整圆盘拓扑网格及边界锚点生成四边曲面参数图，并保存每个生成点对应的原始三角形与重心坐标。输入缺面、重复面或边界不一致时拒绝。
-- `make_control_face`：用明确的控制点网生成原生 B-spline 曲面。控制点不等于曲面插值点，仍需验证对原始几何的偏差。
-- `pullback_affine_pcurve` / `make_affine_pcurve_edge`：从原生 B-spline 支撑曲面上的一段 UV 直线构造同参数三维曲线或边，保留被跨曲面结点的连续性，记录整段系数误差界及浮点余量。
-
-这些接口要求有效的曲面、正权重、可分辨参数区间和可满足的误差预算。共享顶点还须满足自身原生容差与构边条件。无法分辨的结点事件或超出预算时拒绝；生成后仍须核对真实面域、孔、拼接、布尔及整件偏差。
-
-## 限制
-
-有限采样、网格化精度和浮点导数界均不是全局 Hausdorff 误差的严格证书。不自动保证缺失特征恢复、输入完整性、制造公差、装配配合、连续运动或跨面 G1/G2 连续性。重建流程面向单闭壳实体，不自动恢复多实体装配或封闭内腔。
-
-磁盘映射减少 Python 数组内存占用，但不限制原生 CAD 内核的内存。大型曲面仍需外部资源监测。长时间原生调用可通过 `progress` 回调观察；当前执行建议避免周期性强制线程堆栈采样，其与原生计算的相互影响尚未完全查明。
-
-运行生成的报告和诊断缓存包含调用方输入路径及几何数据，应留在本地输出目录。
-
-## 开发与验证
-
-```sh
-python -m pip install .
-python -m unittest discover -s tests -v
-python -m pip install build
-python -m build
-```
-
-测试使用程序生成的几何及故意构造的错误输入，覆盖共有边、壳闭合、容差拒绝、曲线采样、轮廓处理和边界验证。构建产物位于 `dist/`。发布验证范围见 `VALIDATION.md`。
-
-项目只调用依赖库的公开接口，不随源码或 wheel 重新分发依赖库二进制。
 
 ## 许可证
 
-本项目源码、测试与示例采用 [Apache License 2.0](LICENSE)，版权声明见 [NOTICE](NOTICE)。许可允许按条款使用、修改和分发，包括商业使用。第三方依赖保留各自许可证，详见各依赖项目。
+源码、测试和示例采用 [Apache License 2.0](LICENSE)，版权声明见 [NOTICE](NOTICE)。第三方依赖保留各自许可证。
 
-公开文件复查范围见 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)。
+公开副本使用程序构造的合成输入完成 225 项回归测试，并执行安装后的工作流与重建示例；仅排除 2 项依赖非公开模型的历史测试。此数量不含原版本的独立验收，不能外推到任意输入。

@@ -1,7 +1,14 @@
 """Guided reconstruction; no automatic feature recognition or CAD-history recovery."""
-__version__ = "0.3.0.dev17+public.1"
+__version__ = "0.3.0.dev23+public.1"
 
-from .charts import resample_closed_contours_by_anchors, simplify_corresponding_polylines
+def __getattr__(name):
+    # CLI status, resume planning and stored diagnostics need no numeric/CAD runtime.
+    if name in ('resample_closed_contours_by_anchors', 'simplify_corresponding_polylines'):
+        from importlib import import_module
+        value = getattr(import_module('.charts', __name__), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
 
 def validate_native_boundary(*args, **kwargs):
     """Lazy entry point for the explicit actual trimmed-boundary metric."""
@@ -30,6 +37,18 @@ def extract_material_boundary(*args, **kwargs):
     return extract(*args, **kwargs)
 
 
+def union_positive_solids(*args, **kwargs):
+    """Explicit serial native union with per-step positive-material checks."""
+    from .positive_union import union_positive_solids as union
+    return union(*args, **kwargs)
+
+
+def validate_positive_union(*args, **kwargs):
+    """Check named original positive inputs are retained in a native result."""
+    from .positive_union import validate_positive_union as validate
+    return validate(*args, **kwargs)
+
+
 def prepare_source_disk_quads(*args, **kwargs):
     """Prepare complete source-disk quad charts with original barycentric lineage."""
     from .disk_charts import prepare_source_disk_quads as prepare
@@ -56,6 +75,17 @@ def make_affine_pcurve_edge(*args, **kwargs):
 __all__ = ['resample_closed_contours_by_anchors', 'simplify_corresponding_polylines',
            'validate_native_boundary', 'sample_native_edge_bounded',
            'validate_native_boundary_uv_witness', 'validate_native_boundary_low_memory',
-           'extract_material_boundary', 'prepare_source_disk_quads', 'make_control_face',
+           'extract_material_boundary', 'union_positive_solids', 'validate_positive_union',
+           'prepare_source_disk_quads', 'make_control_face',
            'pullback_affine_pcurve', 'make_affine_pcurve_edge']
 
+
+
+def build_winding_index(vertices, faces, *, leaf_size=24):
+    """Index an unchanged triangle soup for bounded signed-winding queries.
+
+    This classifies abs(w)>0.5, not physical occupancy of an open mesh.
+    NumPy is sufficient; the optional acceleration extra enables Numba.
+    """
+    from .winding import BoundedWinding
+    return BoundedWinding(vertices, faces, leaf_size=leaf_size)

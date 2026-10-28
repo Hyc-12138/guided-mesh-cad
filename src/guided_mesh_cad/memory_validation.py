@@ -3,6 +3,7 @@
 This module changes storage/execution, not native precision or sample coverage.
 The original in-memory verifier remains a separate unchanged default strategy.
 """
+from .native_trim import classify_native_uv
 from pathlib import Path
 import gc
 import numpy as np
@@ -62,7 +63,7 @@ class NativeArrayStore:
         except Exception:pass
 
 
-def native_mesh_uv_mapped(shape,store,linear=.001,angular=.05,parallel=False,progress=None):
+def native_mesh_uv_mapped(shape,store,linear=.001,angular=.05,parallel=False,progress=None,*,recover_narrow_faces=False,recovery_records=None):
     """Whole native mesher, serial by default; retain every face/node/triangle."""
     from OCP.BRepTools import BRepTools
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
@@ -73,6 +74,10 @@ def native_mesh_uv_mapped(shape,store,linear=.001,angular=.05,parallel=False,pro
     BRepTools.Clean_s(shape.wrapped)
     mesher=BRepMesh_IncrementalMesh(shape.wrapped,linear,False,angular,parallel)
     if not mesher.IsDone():raise ValueError('native absolute-deflection mesher failed')
+    if recover_narrow_faces:
+        from .mesh_recovery import recover_narrow_face_meshes
+        recovered=recover_narrow_face_meshes(shape,linear,angular)
+        if recovery_records is not None:recovery_records.extend(recovered)
     faces=shape.Faces();counts=[]
     for face in faces:
         mesh=BRep_Tool.Triangulation_s(face.wrapped,TopLoc_Location())
@@ -213,7 +218,7 @@ def owned_extrema_point(extrema,owner,index=1):
         return curve.Value(parameter)
     face=TopoDS.Face_s(support);u,v=extrema.ParOnFaceS1(index)
     if not math.isfinite(u) or not math.isfinite(v):raise ValueError('nonfinite native face projection')
-    classifier=BRepClass_FaceClassifier();classifier.Perform(face,gp_Pnt2d(u,v),1e-9,True,1e-7)
+    classifier=BRepClass_FaceClassifier();classify_native_uv(classifier,face,u,v)
     if classifier.State()!=TopAbs_IN:
         # A kernel face support can lie within its numerical ON band. Return
         # an actual owned trim edge/vertex witness instead of accepting a band
